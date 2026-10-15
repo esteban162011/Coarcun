@@ -1,12 +1,21 @@
 """Cuentas Coarcun - interfaz. Ejecutar con:  streamlit run app.py"""
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 import core
 
-st.set_page_config(page_title="Cuentas Coarcun", page_icon="⚽", layout="wide")
+LOGO = Path(__file__).parent / "logo.png"  # escudo de la corporación (debe estar junto a app.py)
+
+st.set_page_config(page_title="Cuentas Coarcun", page_icon=str(LOGO) if LOGO.exists() else "⚽", layout="wide")
+
+
+def mostrar_logo(ancho):
+    if LOGO.exists():
+        st.image(str(LOGO), width=ancho)
+
 core.init_db()
 core.codigo_admin()  # crea codigo_admin.txt la primera vez que se abre la app
 
@@ -15,6 +24,7 @@ st.markdown("""
 h1, h2, h3 { color: #0070C0; }
 div[data-testid="stMetricValue"] { color: #0070C0; }
 .stButton > button[kind="primary"] { background-color: #0070C0; border-color: #0070C0; }
+div[data-testid="stImage"] img { border-radius: 12px; }
 </style>""", unsafe_allow_html=True)
 
 st.session_state.setdefault("user", None)
@@ -22,8 +32,12 @@ st.session_state.setdefault("user", None)
 
 # ------------------------------------------------------------ ingreso / registro
 def pantalla_ingreso():
-    st.title("⚽ Cuentas Coarcun")
-    st.caption("Corporación Arbitral de Cundinamarca")
+    c_logo, c_titulo = st.columns([1, 6], vertical_alignment="center")
+    with c_logo:
+        mostrar_logo(110)
+    with c_titulo:
+        st.title("Cuentas Coarcun")
+        st.caption("Corporación Arbitral de Cundinamarca")
     t_ing, t_arb, t_adm = st.tabs(["Ingresar", "Primera vez (árbitro)", "Crear administrador"])
 
     with t_ing, st.form("login"):
@@ -62,7 +76,9 @@ def pantalla_ingreso():
                     st.error(str(e))
 
     with t_adm, st.form("registro_admin"):
-        if not core.hay_administradores():
+        if core.codigo_admin() is None:
+            st.error("Falta configurar el código secreto: agrega COARCUN_ADMIN_CODE en los Secrets de la app.")
+        elif not core.hay_administradores() and not core.usa_postgres():
             st.info(f"Aún no hay administradores. El código secreto está en el archivo "
                     f"`{core.CODIGO_FILE}` (junto a la app).")
         nombre = st.text_input("Nombre completo del administrador")
@@ -70,7 +86,7 @@ def pantalla_ingreso():
         c2 = st.text_input("Repite la contraseña", type="password")
         codigo = st.text_input("Código secreto de administradores", type="password")
         if st.form_submit_button("Crear administrador", type="primary"):
-            if codigo != core.codigo_admin():
+            if not core.verificar_codigo_admin(codigo):
                 st.error("Código secreto incorrecto.")
             elif c1 != c2:
                 st.error("Las contraseñas no coinciden.")
@@ -140,6 +156,9 @@ def pagina_cuenta(user):
         "Cant. As.": df["Cant. As."], "Valor unit. Asistencias": df["Valor unit. Asistencias"].map(core.fmt),
         "Cant. C.": df["Cant. C."], "Valor unit. Centros": df["Valor unit. Centros"].map(core.fmt),
         "Pasaje": df["Pasaje"].map(core.fmt), "Valor Total": df["Valor Total"].map(core.fmt)})
+    if df["Cant. E."].any():  # columnas de emergente solo si hubo servicios como emergente
+        vista.insert(7, "Cant. E.", df["Cant. E."])
+        vista.insert(8, "Valor unit. Emergentes", df["Valor unit. Emergentes"].map(core.fmt))
     if user["rol"] == "admin" and df["Aviso"].any():
         vista["Aviso"] = df["Aviso"]
     st.dataframe(vista, hide_index=True)
@@ -217,7 +236,8 @@ def pagina_cargar():
 
 def pagina_precios():
     st.header("Precios y pasajes")
-    t1, t2, t3 = st.tabs(["Valor por servicio", "Torneos que pagan pasaje", "Valor del pasaje"])
+    t1, t2, t3, t4 = st.tabs(["Valor por servicio", "Tipo de pasaje por torneo",
+                              "Pasaje según residencia", "Pasaje de valor único"])
 
     with t1:
         df = core.tabla_precios()
@@ -235,8 +255,12 @@ def pagina_precios():
                 st.rerun()
 
     with t2:
+        st.caption("Para cada torneo elige: no paga pasaje, paga según dónde vive el árbitro, "
+                   "o paga un valor único por ciudad del partido sin importar dónde viva.")
         df = core.tabla_torneos()
-        ed = st.data_editor(df, hide_index=True, key="ed_torneos", disabled=["Torneo"])
+        ed = st.data_editor(df, hide_index=True, key="ed_torneos", disabled=["Torneo"],
+                            column_config={"Pasaje": st.column_config.SelectboxColumn(
+                                options=core.MODOS_PASAJE, required=True, width="large")})
         if st.button("Guardar torneos"):
             core.guardar_torneos(ed)
             st.success("Guardado.")
@@ -252,6 +276,19 @@ def pagina_precios():
                                 column_config={"Pasaje": st.column_config.NumberColumn(min_value=0, step=1000)})
             if st.button("Guardar pasajes"):
                 core.guardar_pasajes(resid, ed)
+                st.success("Guardado.")
+
+    with t4:
+        unicos = core.torneos_pasaje_unico()
+        if not unicos:
+            st.info("Ningún torneo tiene pasaje de valor único. Actívalo en la pestaña «Tipo de pasaje por torneo».")
+        else:
+            torneo = st.selectbox("Torneo", unicos)
+            df = core.tabla_pasajes_torneo(torneo)
+            ed = st.data_editor(df, hide_index=True, key=f"ed_unico_{torneo}", disabled=["Ciudad del partido"],
+                                column_config={"Pasaje": st.column_config.NumberColumn(min_value=0, step=1000)})
+            if st.button("Guardar pasajes del torneo"):
+                core.guardar_pasajes_torneo(torneo, ed)
                 st.success("Guardado.")
 
 
@@ -301,7 +338,8 @@ def main():
         return pantalla_ingreso()
 
     with st.sidebar:
-        st.markdown("### ⚽ Cuentas Coarcun")
+        mostrar_logo(100)
+        st.markdown("### Cuentas Coarcun")
         st.write(f"**{user['nombre']}**  \n{'Administrador' if user['rol'] == 'admin' else 'Árbitro'}")
         if user["rol"] == "admin":
             paginas = {"Cuenta de cobro": lambda: pagina_cuenta(user), "Cargar designaciones": pagina_cargar,
